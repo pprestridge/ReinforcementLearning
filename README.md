@@ -8,4 +8,5 @@ Files:
 
 BlackJackRL - Develop a simplified game of Black Jack and Teach a DQN Agent to play the game
 
+2048RL - Develop a game of 2048 and teach a DQN Agent to play
 
