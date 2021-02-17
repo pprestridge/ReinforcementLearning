@@ -8,9 +8,11 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Flatten
 from tensorflow.keras.optimizers import Adam
 from rl.agents import DQNAgent
-from rl.policy import BoltzmannQPolicy
+from rl.policy import BoltzmannQPolicy, EpsGreedyQPolicy, LinearAnnealedPolicy
 from rl.memory import SequentialMemory
+from rl.callbacks import Callback
 
+NeedToTrain = True
 
 """
 Define a 2048 environment using OpenAI gym 
@@ -142,6 +144,25 @@ def to_matrix (board):
     board[board == 0] = np.nan
     return board
 
+# Function to check whether two max pieces are adjacent
+def max_pieces_adjacent(board):
+
+    #Locate two highest numbers
+    board = np.nan_to_num(board, copy=True, nan=0.0, posinf=None, neginf=None)
+    max_ind = np.unravel_index(board.argmax(), board.shape)
+    board[max_ind] = 0
+    second_max_ind = np.unravel_index(board.argmax(), board.shape)
+
+    #Determine if positions are adjacent
+    distance = abs(max_ind[0] - second_max_ind[0]) + abs(max_ind[1] - second_max_ind[1])
+    if distance <= 1:
+        adjacent = True
+    else:
+        adjacent = False
+
+    return adjacent
+
+
 # Define our custom environment for the agent to operate in
 class GameEnv(Env):
 
@@ -155,18 +176,22 @@ class GameEnv(Env):
                                                  99999,99999,99999,99999] )
         # Set start point by drawing two cards
         board = create_empty_board()
-        board = add_piece(add_piece(board))
+        board = add_piece(board)
+        board = add_piece(board)
         state = to_observation(board)
         self.state = np.reshape(state, (1, state.shape[0]))
 
     def step(self, action):
+
+        # Convert the board to a matrix from the environment's state
+        board = to_matrix(self.state)
+        pieces_before = len(self.state[self.state > 0])
 
         # Apply action
         # 0: Move Down
         # 1: Move Up
         # 2: Move Right
         # 3: Move Left
-        board = to_matrix(self.state)
         if action == 0:
             board = move_down(board)
         elif action == 1:
@@ -176,17 +201,54 @@ class GameEnv(Env):
         else:
             board = move_left(board)
 
+
+        # Reward agent for (1) Combining pieces, (2) Keeping the highest piece in a corner, and (3) Keeping the highest
+        # two pieces adjacent
+
+        reward = 0
+
+        post_move_state = to_observation(board)
+        pieces_after = len(post_move_state[post_move_state>0])
+        if pieces_after < pieces_before:
+            reward += 1
+
+        max_index = np.amax(to_observation(board))
+        if max_index == 0 or max_index == 4 or max_index ==12 or max_index == 15:
+            reward += 1
+
+        if max_pieces_adjacent(board):
+            reward += 1
+
+
         # Check if game state is still alive
+
+        done = True
         if game_check(board):
             board = add_piece(board)
             done = False
-        else:
-            done = True
 
-        # Calculate reward and set game state
+        # If there aren't any empty spaces, check if there is a move to salvage the run and make it
+        else:
+            if game_check(move_down(board)):
+                board = move_down(board)
+                board = add_piece(board)
+                done = False
+            if game_check(move_up(board)):
+                board = move_up(board)
+                board = add_piece(board)
+                done = False
+            if game_check(move_left(board)):
+                board = move_left(board)
+                board = add_piece(board)
+                done = False
+            if game_check(move_right(board)):
+                board = move_right(board)
+                board = add_piece(board)
+                done = False
+
+        # Set the game state in the correct format
         state = to_observation(board)
         self.state = state
-        reward = np.sum(self.state)
 
         # Set placeholder for info
         info = {}
@@ -195,7 +257,7 @@ class GameEnv(Env):
 
 
     def render(self):
-        pass
+        print(to_matrix(self.state))
 
     def reset(self):
         # Reset agent's hand
@@ -208,33 +270,36 @@ class GameEnv(Env):
 # Create training environment
 trainEnv = GameEnv()
 testEnv = GameEnv()
+testEnv.reset()
 
 # Test environment with random inputs from action_space
-episodes = 1
+episodes = 20
 for episode in range(1, episodes+1):
     state = trainEnv.reset()
     done = False
     score = 0
+    steps = 0
 
     while not done:
         action = trainEnv.action_space.sample()
         n_state, reward, done, info, = trainEnv.step(action)
-    print('Episode: {0} Score: {1}'.format(episode, reward))
+        steps += 1
+        score = score + reward
+    trainEnv.render()
+    print('Episode: {0} Score: {1} Steps: {2}'.format(episode, score, steps))
 
 """
 Create a Deep Learning Model with Keras
 """
+
+#Define environment's action and observatoin space to guide model development
 states = trainEnv.observation_space.shape
 actions = trainEnv.action_space.n
 
-print(states)
-print(actions)
-
 def build_model(states, actions):
     model = Sequential()
-    model.add(Dense(24, activation='relu', input_shape=(16,)))
-    model.add(Flatten())
-    model.add(Dense(24, activation='relu'))
+    model.add(Dense(24, activation='relu', input_shape=states))
+    model.add(Dense(32, activation='relu'))
     model.add(Dense(actions, activation='sigmoid'))
     return model
 
@@ -243,24 +308,26 @@ model = build_model(states, actions)
 print(model.summary())
 
 """
-Build Agent with Keras RL
+Build Agent with Keras RL and TensorFlow
 """
 
 def build_agent(model, actions):
     policy = BoltzmannQPolicy()
-    memory = SequentialMemory(limit = 50000, window_length=1)
+    memory = SequentialMemory(limit = 200000, window_length=1)
     dqn = DQNAgent(model=model, memory=memory, policy=policy, nb_actions=actions,
-                   nb_steps_warmup=50, target_model_update=1e-2)#had to update dqn.py line59 -- added extra dimension
+                   nb_steps_warmup=200, target_model_update=5e-3)#had to update dqn.py line59 -- added extra dimension
     return dqn
 
 dqn = build_agent(model, actions)
 dqn.compile(Adam(learning_rate=1e-3), metrics=['mae'])
-dqn.fit(trainEnv, nb_steps=50000, visualize=False, verbose=1)
 
-dqn.save_weights('2048dqn_weights.h5f', overwrite=True)
+if NeedToTrain:
+    dqn.fit(trainEnv, nb_steps=500000, visualize=False, verbose=1)
+    dqn.save_weights('2048dqn_weights.h5f', overwrite=True)
+
 """
 Test agent 
 """
 
 dqn.load_weights('2048dqn_weights.h5f')
-out = dqn.test(testEnv, nb_episodes=5, visualize=True)
+_ = dqn.test(testEnv, nb_episodes=20, visualize = False, verbose=1)
